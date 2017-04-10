@@ -1,0 +1,223 @@
+---
+title: "Qualitative Activity Recognition of Weight Lifting Exercises"
+author: "NicZ8"
+date: "10 April 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Executive Summary
+
+The purpose of this machine learning project was to generate a model to predict the type of execution (Class) of a dumbbell exercise from measured data of an experiment.
+
+For the experiment, six participants were asked to perform dumbbell biceps curls in five different ways: correctly (Class A) and incorrectly corresponding to four common mistakes (Class B, C, D and E). The corresponding dataset contains data from four sensors (accelerometers) on the belt, forearm, arm, and dumbell of the six participants. 
+More information is available here: <http://groupware.les.inf.puc-rio.br/har>.
+
+Three prediction models were trained and tested using different algorithms. The best model was created with the random forest algorithm and has an estimated prediction accuracy of over 99%.
+
+## Exploratory Data Analysis
+
+### Loading data sets and required R packages
+
+```{r load_packages, cache=TRUE, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(rpart)
+library(rattle)
+library(MASS)
+library(scales)
+```
+```{r load_data, cache=TRUE}
+training <- read.csv("pml-training.csv", stringsAsFactors = FALSE)
+testing <- read.csv("pml-testing.csv", stringsAsFactors = TRUE)
+```
+
+### Overview of the data
+
+```{r}
+dim(training)
+dim(testing)
+```
+
+Both datasets have 160 variables, however, they are not all identical.
+```{r}
+setdiff(names(training), names(testing))
+setdiff(names(testing), names(training))
+```
+This means that the variable `classe` is in the `training` data but not in the `testing` data and the variable `problem_id` is in the `testing` data but not in the `training` data. All other variables are contained in both data sets.
+
+### Outcome variable
+
+The `classe` variable describing the way the dumbbell exercise was performed is the outcome variable. In the `training` set it has the following distribution.
+```{r classes_table}
+table(training$classe)
+```
+
+Since the `classe` variable describes a classification of five categories, I transformed it into a factor variable.
+
+```{r classes_factor}
+training$classe <- as.factor(training$classe)
+```
+
+
+### Training and testing (validation) set of data
+
+The `testing` dataset from `pml-testing.csv` is not useful for model testing and selection because it only includes 20 observations and does not contain the outcome variable.
+In order to train and validate prediction models, I therefore split the `training` dataset into a training subset `trn` (75% of data) and a testing subset `tst` (25% of data).
+
+```{r data_partition, cache=TRUE}
+set.seed(88) # to ensure reproducibility
+inTrain <- createDataPartition(training$classe, p = 0.75)[[1]]
+trn <- training[ inTrain, ]
+tst <- training[-inTrain, ]
+```
+
+
+
+## Feature Selection / Cleaning Data
+
+Feature selection methods can be used to identify and remove unneeded, irrelevant and redundant attributes from data that do not contribute to the accuracy of a predictive model or may in fact decrease the accuracy of the model.
+
+### Remove variables with too many missing values
+
+Variables with a very high percentage of missing values are not useful for a prediction model and are therefore removed from the data.
+
+```{r na_values, cache=TRUE}
+na.val <- colSums(is.na(trn))
+table(na.val)
+```
+
+67 variables have a very high number of NA values and will be removed from the dataset. I removed them from both the training and testing data subsets to maintain comparability.
+
+```{r na_variables, cache=TRUE}
+nas <- names(na.val[na.val != 0]) # vector of variable names with too many NA's
+```
+
+### Remove irrelevant variables
+
+The aim of the experiment and the measurements taken during the dumbbell exerises was to develop feedback to users on the quality of their execution of the exercise. This should be independent of the specific person and any time related variables and instead be determined by the measurements of the accelerometer sensors.
+Therefore, the ID number `X`, the user name and all time related variables are removed from the dataset.
+The `classes` variable is the outcome variable and will be retained along with the sensor measurements.
+
+```{r clean_data, cache=TRUE}
+trn_clean <- trn %>% 
+        dplyr::select(-one_of(nas)) %>% # remove variables with too many NA's
+        dplyr::select(-(X:num_window))  # remove other irrelevant variables 
+tst_clean <- tst %>% 
+        dplyr::select(-one_of(nas)) %>% # remove variables with too many NA's
+        dplyr::select(-(X:num_window))  # remove other irrelevant variables 
+```
+
+
+### Remove predictors with near zero variance
+
+Variables that have almost no variance in their values will have a very low impact on prediction model accuracy and can therefore be excluded from the data.
+
+```{r nzv, cache=TRUE}
+nzv <- nearZeroVar(trn_clean, saveMetrics = TRUE)
+nzv.vars <- row.names(nzv[nzv$nzv == TRUE, ])
+trn_slct <- trn_clean %>% 
+        dplyr::select(-one_of(nzv.vars))  # remove near zero variance predictors
+tst_slct <- tst_clean %>% 
+        dplyr::select(-one_of(nzv.vars))  # remove near zero variance predictors
+```
+
+```{r selected_data}
+dim(trn_slct)
+```
+
+The remaining data set is now reduced to 53 variables containing the outcome `classe` and 52 predictors. Below is a list of the remaining variables.
+
+```{r selected_variables}
+names(trn_slct)
+```
+
+
+## Model Fit
+
+In order to create a prediction model, I applied the training data subset to three model building algorithms:  
+        
+  *  Classification Tree with Recursive Partitioning (rpart)  
+  *  Linear Discriminant Analysis (LDA)
+  *  Random Forest
+        
+The aim was to find the model with the lowest out of sample error, i.e. error resulting from applying the prediction algorithm to a new data set. I did this by using the `predict` function from the `caret` package and evaluating the the prediction accuracy of each model. 
+
+### Cross Validation
+
+For the first two models (the classification tree and LDA) I performed cross validation using the `trControl` attribute in the `train` function of the `caret` package, taking 3 subsamples to cross validate. 
+
+The random forest algorithm automatically bootstraps by default, therefore additional cross validation is not necessary as a guard against over-fitting.
+
+### Model 1 - Classification Tree with rpart (Recursive Partitioning)
+```{r rpart_model, cache=TRUE}
+set.seed(88)
+model.rpart <- train(classe ~ ., method = "rpart", data = trn_slct,
+                     trControl = trainControl(method = "cv", number = 3))
+pred.rpart <- predict(model.rpart, newdata = tst_slct)
+cm.rpart <- confusionMatrix(pred.rpart, tst_slct$classe)
+cm.rpart$table
+cm.rpart$overall[1]
+```
+
+The accuracy of the classification tree model of less than 0.5, i.e. an out of sample error of `r percent(1-cm.rpart$overall[1])`, is not satisfactory for a prediction model.
+
+The following plot shows a representation of the classification tree.
+```{r tree_plot, cache=TRUE}
+fancyRpartPlot(model.rpart$finalModel)
+```
+
+It is notable from the confusion matrix and the plot that the model failed to predict Class D.
+
+### Model 2 - Linear Discriminant Analysis
+
+```{r lda_model, cache=TRUE}
+set.seed(88)
+model.lda <- train(classe ~ ., data = trn_slct, method = "lda", 
+                   trControl = trainControl(method = "cv", number = 3)) 
+pred.lda <- predict(model.lda, newdata = tst_slct)
+cm.lda <- confusionMatrix(pred.lda, tst_slct$classe)
+cm.lda$table
+cm.lda$overall[1]
+```
+
+The accuracy of this model is an improvement over the previous model but still less than 0.75 (i.e. out of sample error of `r percent(1-cm.lda$overall[1])`) and probably won't give good predictions.
+
+### Model 3 - Random Forest
+
+To reduce computing time, the number of trees in the random forest algorithm was reduced from the default 500 to 50 which still yielded very accurate results as can be seen below.
+To further reduce computing time, I used the `randomForest` function directly with specified `y` as the response vector (if a factor, classification is assumed) and `x` as the data frame of predictors, rather than the `train` function with a formula.
+
+```{r rf_model, cache=TRUE}
+set.seed(88)
+model.rf <- randomForest(y = as.factor(trn_slct$classe), x = trn_slct[, -53], ntree = 50)
+pred.rf <- predict(model.rf, newdata = tst_slct)
+cm.rf <- confusionMatrix(pred.rf, tst_slct$classe)
+cm.rf$table
+cm.rf$overall[1]
+```
+
+The random forest algorithm produces a very accurate model and is the best out of the three models created. It has an out of sample error of only `r percent(1-cm.rf$overall[1])`. This model is therefore chosen for prediction.
+
+The following plot shows the importance of each variable for the prediction.
+```{r rf_varimpplot}
+varImpPlot(model.rf) 
+```
+
+
+## Prediction of Testing Dataset
+
+I applied my chosen machine learning algorithm, the random forest model `model.rf`, to the 20 test cases available in the test data from `pml-testing.csv` to make predictions on the classes of exercise execution.
+First, I transformed the testing data to only include the variables from the train data on which the model was built.
+```{r predict}
+testing_slct <- testing %>%
+        dplyr::select(-one_of(nas), -(X:num_window), -one_of(nzv.vars))
+print(predict(model.rf, newdata = testing_slct))
+```
+
+
